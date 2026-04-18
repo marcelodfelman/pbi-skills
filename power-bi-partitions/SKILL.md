@@ -200,3 +200,114 @@ Any `Fact*.tmdl` partition that generates synthetic data. The vulnerable pattern
 ### Detection heuristic
 
 Grep each `Fact*.tmdl` for `Number.RandomBetween`, then check every `rN =` for dual use. Fixed across this project in FactSales, FactAR, FactPurchases, FactShipment, FactInventory.
+
+## Synthetic-data anti-patterns (found in production demo data)
+
+When a generated fact table produces KPIs outside realistic ranges, one of these five patterns is usually the cause:
+
+### 1. Independent-share normalization
+
+Generating per-competitor/per-channel shares with independent random draws yields shares that sum to 120%+. Rendering a stacked bar or a market-share card then shows totals above 100% — business-illegal and embarrassing.
+
+```m
+// WRONG — each share drawn independently, sum is arbitrary
+shares = List.Transform(competitors, each Number.RandomBetween(0.05, 0.25))
+
+// CORRECT — normalize so each (period, category) group sums to 1.0
+rawShares = List.Transform(competitors, each Number.RandomBetween(0.05, 0.25)),
+shareSum  = List.Sum(rawShares),
+shares    = List.Transform(rawShares, each _ / shareSum)
+```
+
+### 2. Spend anchored to budget instead of incremental value
+
+Symptom: campaign/promo ROI is stuck at −95% to −100% across every campaign, no variation.
+
+Cause: `Spend = budget × ~1.0` while `IncrementalGM = revenue × liftPct × GMrate ≈ 3% of revenue`. ROI = (IncGM − Spend) / Spend ≈ −97%.
+
+Fix: anchor spend to the incremental gain, not the budget.
+```m
+// Spend should roughly match IncrementalGM so ROI lands in mixed ± range
+spendActual = incrementalGM * (0.5 + Number.RandomBetween(0, 1.2))
+```
+Yields ROI between −40% and +100%. Some campaigns win, some lose. Realistic.
+
+### 3. Constant-multiplier rates
+
+Symptom: every row shows the same 2.20% CTR / 1.5% defect rate / identical conversion.
+
+Cause: `rate = numerator / denominator` where numerator is `denominator * 0.022` exactly.
+
+Fix: per-row random draw, not a constant.
+```m
+ctrDraw = Number.RandomBetween(0.008, 0.045),
+Clicks  = Number.Round(Impressions * ctrDraw, 0)
+```
+
+### 4. Hardcoded descending year multiplier
+
+Symptom: every `by Year` trend chart shows revenue/volume/OEE collapsing year-over-year.
+
+Cause: partition hardcodes `YearMul = if Year=2023 then 1.2 else if Year=2024 then 1.0 else 0.8` (or equivalent). Makes the business look like it's dying.
+
+Fix: default to flat or mild growth (`2023=0.95, 2024=1.00, 2025=1.05`). Preserve seasonal factors. If you want variation, let the randomness produce it — don't hardcode decline.
+
+### 5. DayCount shorter than calendar range
+
+Symptom: the latest year looks like a cliff — sharp drop in Q4.
+
+Cause: `DayCount=1000` with a 3-year date range (1095 days). Last 95 days missing.
+
+Fix: set `DayCount` to cover the full calendar, or compute it: `DayCount = Duration.Days(endDate - startDate) + 1`.
+
+### Flag-subset rule
+
+Any boolean flag that represents a "bad subset" of a universe (overdue of open, rejected of submitted, defect of produced) must be computed as the AND of the parent condition and the bad condition. If `isOverdue` can be `true` when `isOpen = false`, then Overdue% will exceed 100% of Open, which is logically impossible.
+
+```m
+isOverdue = isOpen and (dueDate < AsOfDate)   // ← AND isOpen, not standalone
+```
+
+Fixed across this project: FactCampaign (spend), FactCampaign (CTR), FactSales (YearMul), FactMarketMeasurement (share normalization), FactQualityEvent (isOverdue subset), DimPromo (trade spend scale).
+
+## Cyclic reference from nested closures
+
+**Symptom at load time**: Desktop shows `"N queries are blocked by the following error: FactX — A cyclic reference was encountered during evaluation."` Blocks every query that depends on FactX.
+
+**Root cause**: Two or more `List.Transform` / `List.Combine` closures nested several levels deep, with inner lambdas referencing variables bound in outer lambdas. The engine's lazy evaluator can get confused about dependency order and flag it as cyclic — even when the logic is structurally fine.
+
+```m
+// WRONG — nested closures + double List.Combine triggers cyclic-ref
+WeekCatGroups = List.Combine(List.Transform(WeekList, (w) =>
+    List.Transform(Categories, (cat) =>
+        let
+            ...
+            compRows = List.Transform(..., (idx) =>
+                {w, cat, ...}   // references w and cat from 2 outer closures
+            )
+        in compRows
+    )
+)),
+Combos = List.Combine(WeekCatGroups)   // second flatten
+```
+
+**Fix — flatten the grid first, then iterate with a single lambda**:
+
+```m
+// CORRECT — build flat (key, key) grid, then one List.Transform over it
+WeekCats = List.Combine(List.Transform(WeekList, (w) =>
+    List.Transform(Categories, (c) => [wk = w, cat = c])   // leaf is a record, no computation
+)),
+ExpandedRows = List.Combine(List.Transform(WeekCats, (wc) =>
+    let
+        w = wc[wk],
+        cat = wc[cat],
+        ...all the per-group computation...
+        compRows = List.Transform(..., (idx) => [...])
+    in compRows
+)),
+```
+
+Two rules:
+1. **Keep nested lambdas shallow.** At most one inner closure that references variables from one outer closure. Anything deeper — flatten the iteration domain first.
+2. **Use records, not positional lists, for lookup data.** `[key=0, code="OWN", base=0.22]` with `comp[base]` is immune to position shifts and reads more clearly than `{0, "OWN", 0.22}` with `c{2}`.

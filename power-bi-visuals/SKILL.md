@@ -445,3 +445,39 @@ Rules:
 - **Column order = display order.** Projections render left-to-right in the order they appear in the `projections` array.
 - **Mix column and measure types freely** — both use the same `Values` well; the `field` discriminator (`Column` vs `Measure`) is what the engine uses to decide grouping vs aggregation.
 - **Contrast with charts.** Line/bar charts *do* use separate wells (`Category`, `Values`, `Series`). That's why this mistake happens — developers copy the chart pattern into tables. For `tableEx` and `pivotTable` rows, flatten everything into `Values`.
+
+## Table bindings: dim column that explodes rows with repeating measure values
+
+When a table binds a dim column whose values don't exist in the fact (e.g. `Customer × Channel` where AR is a customer-level measure), each customer gets one row *per channel*, and all channels show the same AR value — repeated identically — while sales/GM only populate for the channel actually used. Users read 7× rows of blank cells and identical AR numbers.
+
+**Rule:** never add a dim column to a table's Values projections that is *one-to-many* with the fact being shown. Either:
+- Remove the offending dim column (if it's not essential to the grouping), OR
+- Switch to a different fact table / measure that joins meaningfully to that dim, OR
+- Use a matrix with the second dim on Columns (so blanks collapse visually).
+
+Symptom to watch for: measure values repeating identically across groups + many blank cells in a table.
+
+## Bar chart data labels must sit `OutsideEnd`
+
+Default label position on bars overlaps the bar fill — values become unreadable against the colored bar. Always set:
+```json
+"labels": [{"properties": {
+  "show": {"expr": {"Literal": {"Value": "true"}}},
+  "labelPosition": {"expr": {"Literal": {"Value": "'OutsideEnd'"}}},
+  "color": {"solid": {"color": {"expr": {"Literal": {"Value": "'#262329'"}}}}},
+  "fontFamily": {"expr": {"Literal": {"Value": "'Segoe UI'"}}},
+  "fontSize": {"expr": {"Literal": {"Value": "'9'"}}}
+}}]
+```
+
+## Line chart with only 2 points = diagonal straight line
+
+Symptom: a `by Year` line chart on 2 years of data shows a single diagonal straight line — no signal, just an endpoint-to-endpoint diagonal. The visual is bound to `DimDate[Year]` only.
+
+**Fix:** add `DimDate[MonthName]` as a second level in the Categories projections, with BOTH levels `active: true` so the chart renders monthly points that aggregate into the Year header. (Setting MonthName `active: false` means drill-down-available-but-not-expanded — which leaves the chart at the Year level, i.e. still two points.)
+
+## Unicode escape literal in visual.json binding strings
+
+If a measure name contains `³`, `°`, `₪`, `µ` (Water Intensity `(m³/T)`, Temperature `(°C)`, etc.) and the `visual.json` binding was copy-pasted from a terminal that escaped the character, you'll see the literal 6-character sequence `\u00b3` in `Property`, `queryRef`, and `nativeQueryRef`. The measure lookup fails and Desktop renders the KPI card as a visual-level error ("See details" with X icon).
+
+**Fix:** replace the literal escape with the actual unicode character. `\u00b3` → `³`, `\u00b0` → `°`, `\u20aa` → `₪`, `\u00b5` → `µ`. Desktop always writes the real character, never the escape. If you edit bindings by hand, verify the JSON contains `³` directly.

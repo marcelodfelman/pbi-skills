@@ -275,3 +275,114 @@ RETURN DIVIDE(CY - PY, PY)
 ```
 
 Never use: `TOTALYTD`, `TOTALMTD`, `TOTALQTD`, `SAMEPERIODLASTYEAR` — all anchor to TODAY().
+
+## Period-normalized rate measures
+
+Any `rate %` measure that counts events (Turnover, Training Completion, Defect %, Attendance Incident Rate) must scale its denominator to the filter-context period length. Without this, a quarterly slice shows 4× the annual rate — stakeholders see "Turnover 116%" and lose trust.
+
+```dax
+Turnover % =
+VAR DaysInPeriod = 1 + DATEDIFF(MIN(DimDate[Date]), MAX(DimDate[Date]), DAY)
+VAR MonthsInPeriod = DaysInPeriod / 30.44
+VAR Departures = [Terminations Count]
+VAR AnnualizedRate = DIVIDE(Departures, [Headcount]) * (12 / MonthsInPeriod)
+RETURN AnnualizedRate
+```
+
+Same pattern for denominator-based completion rates:
+```dax
+Mandatory Training Completion % =
+VAR MonthsInPeriod = (1 + DATEDIFF(MIN(DimDate[Date]), MAX(DimDate[Date]), DAY)) / 30.44
+VAR Required = [Headcount] * (MonthsInPeriod / 12)   -- scales with period
+VAR Completed = [Mandatory Training Events Count]
+RETURN DIVIDE(Completed, Required)
+```
+
+## BLANK-safe future-date measures
+
+Measures that compute distance to a future event (`Days to Next Expiry`, `Days Until Next Audit`, `Time to Next Maintenance`) must guard `DATEDIFF` against a BLANK anchor. Otherwise the card renders a visual-level error ("See details" with X icon) instead of gracefully showing BLANK.
+
+```dax
+// WRONG — DATEDIFF(TODAY(), BLANK(), DAY) errors the visual
+Days to Next Expiry = DATEDIFF(TODAY(), MINX(FILTER(...), [ExpiryDate]), DAY)
+
+// CORRECT
+Days to Next Expiry =
+VAR NextExp = CALCULATE(
+    MIN(DimCertification[ExpiryDate]),
+    DimCertification[IsActive] = TRUE,
+    DimCertification[ExpiryDate] >= TODAY()
+)
+RETURN IF(ISBLANK(NextExp), BLANK(), DATEDIFF(TODAY(), NextExp, DAY))
+```
+
+## Comparison-period alignment (vs Budget, vs PY, vs Plan)
+
+A measure like `vs Budget %` must compare matched periods. When the filter context is "All Years" and `Budget` is a single year's plan × 1.08, the naive `(NS − Budget) / Budget` explodes to 160%+. Always anchor both numerator and denominator to the same year window:
+
+```dax
+Net Sales vs Budget % =
+VAR MaxDate = CALCULATE(MAX(FactSales[SalesDate]), ALL())
+VAR CY_NS      = CALCULATE([Net Sales],        YEAR(DimDate[Date]) = YEAR(MaxDate))
+VAR CY_Budget  = CALCULATE([Budget Net Sales], YEAR(DimDate[Date]) = YEAR(MaxDate))
+RETURN DIVIDE(CY_NS - CY_Budget, CY_Budget)
+```
+
+## Contribution Margin vs Gross Margin
+
+`Contribution Margin % = Gross Margin %` is a bug. Contribution Margin = Net Sales − COGS − Variable Selling Costs (freight, commissions, trade spend), so it must be ~6–10 percentage points below GM%. If a model doesn't have a separate variable-selling column, use a proxy:
+
+```dax
+Contribution Margin = [Net Sales] - [COGS] - [Net Sales] * 0.08
+Contribution Margin % = DIVIDE([Contribution Margin], [Net Sales])
+```
+
+## Subset-count measures — Overdue / Overdue% rule
+
+Any "bad subset of universe" measure (Overdue CAPAs, Rejected Submissions, Failed Audits) must be a strict subset of its parent universe. If Overdue is defined independently of Open, you can see Overdue% > 100% — logically impossible.
+
+```dax
+// WRONG — over-counts
+Overdue CAPAs = CALCULATE(COUNTROWS(FactQualityEvent), FactQualityEvent[IsOverdue] = TRUE)
+
+// CORRECT — subset of Open
+Overdue CAPAs =
+CALCULATE(
+    COUNTROWS(FactQualityEvent),
+    FactQualityEvent[IsOpen] = TRUE,
+    FactQualityEvent[IsOverdue] = TRUE
+)
+
+// Denominator includes both open-not-overdue and open-overdue:
+Overdue CAPA % = DIVIDE([Overdue CAPAs], [Open CAPAs])  -- where Open CAPAs already includes overdue ones
+```
+
+Verify in the underlying M partition too: `isOverdue` must be `isOpen AND past_due`, not standalone.
+
+## BLANK-safe count/percentage measures (force 0 instead of BLANK)
+
+`CALCULATE(COUNTROWS(...), filter)` returns **BLANK** (not 0) when the filter yields zero rows. When such a count feeds a `DIVIDE`, the whole percentage shows as (Blank) on the card — users read it as "measure broken" when actually the filter just didn't match anything in current context.
+
+Force 0 with the `+ 0` idiom or a third `DIVIDE` argument:
+
+```dax
+// WRONG — returns BLANK when no rows match IsOverdue=TRUE
+Overdue CAPA % = DIVIDE([Overdue CAPAs], [Open CAPAs])
+
+// CORRECT — explicit 0 default, BLANK replaced with 0 at numerator AND denominator
+Overdue CAPA % = DIVIDE([Overdue CAPAs] + 0, [Open CAPAs], 0)
+```
+
+The `+ 0` coerces the numerator: `BLANK + 0 = 0`, so the division evaluates to 0 instead of propagating BLANK. The third `DIVIDE` arg handles the zero-denominator case.
+
+Apply this pattern to every count-based rate: defect %, rejection %, overdue %, compliance %, etc.
+
+## Strict-filter measures that reference rare flag values
+
+A measure like `CALCULATE(SUM(...), SomeColumn = "High")` returns BLANK if the data generator never emits `"High"` (or emits it very rarely). The card reads (Blank), the user asks "why", and the answer is "that value never exists in this data."
+
+Before shipping any `column = "specific_value"` filter:
+1. Verify the partition M actually assigns that value (grep the M for the string literal).
+2. If the data is seeded deterministically and the rare category stays empty, either adjust the M threshold to guarantee some matches, or switch to a numeric threshold on a raw column (e.g. `DaysPastDue > 60` instead of `RiskTag = "High"`).
+
+Rule: never build a KPI around a categorical column value that your data generator doesn't guarantee to produce.

@@ -302,3 +302,46 @@ When a KPI card shows BLANK:
 - Cards: y=84, h=84, bottom=168
 - Charts row1: y=175, h=258
 - Charts row2: y=438, h=272
+
+## KPI card shows "See details" with X icon (visual-level error)
+
+A KPI `card` visual rendering an X icon and "See details" link means the query failed — Desktop couldn't resolve the bound measure. Common root causes:
+
+1. **Unicode escape literal in the binding string.** A measure named `Water Intensity (m³/T)` bound with literal `\u00b3` instead of the `³` character — the lookup fails. Grep the offending `visual.json` for `\u00` and replace with the real character.
+2. **BLANK not guarded in the measure.** A measure using `DATEDIFF(TODAY(), SomeFutureDate, DAY)` where the future date can be BLANK — the error surfaces on the card, not a BLANK value. Wrap with `IF(ISBLANK(x), BLANK(), DATEDIFF(...))`.
+3. **Measure references a renamed/dropped column.** Any column rename requires manual DAX update on every measure that referenced it. See power-bi-modeling for the audit pattern.
+4. **Relationship broken.** Card pulls from a fact that lost its relationship to a dim used in the filter context. Check the relationships TMDL file.
+
+Diagnosis order: grep for the KPI name in `visual.json`, check for `\u00` literals, then check the bound measure's DAX for `DATEDIFF` / `ISBLANK` guards.
+
+## Unrealistic KPI values — the FMCG benchmarks check
+
+When stakeholders complain "these numbers look wrong", compare to the realistic-range table in CLAUDE.md before debugging. Any KPI outside these ranges signals a data-generator bug, not a formula bug:
+
+| KPI | Realistic range |
+|---|---|
+| DSO | 45–60 days |
+| DIO | 30–60 days |
+| Procurement Spend / Net Sales | 50–65% |
+| EBITDA % | 10–15% |
+| Annual Turnover | 10–25% |
+| Market Share (total across competitors) | **exactly 100%** |
+| Overdue (any category) | **≤ Open count, always** |
+| Rate columns (CTR, defect %, return %) | **must vary per row**, not constant |
+
+The most common root cause for an out-of-range KPI is the synthetic-data generator, not the DAX. See power-bi-partitions "Synthetic-data anti-patterns" for the five recurring patterns: independent-share normalization, spend anchored to wrong base, constant-multiplier rates, descending year multipliers, short DayCount.
+
+## "By Year" line chart renders as diagonal straight line
+
+Symptom: a trend chart with only 2 years of data draws a single diagonal line with no mid-year points.
+
+Cause: Categories projection has only `DimDate[Year]` — two annual totals = two points = diagonal.
+
+Fix: add `DimDate[MonthName]` as a second level with BOTH `active: true`. The chart now renders 24 monthly points but shows yearly headers. See power-bi-visuals for the projection JSON shape.
+
+## Measure returning BLANK that should be zero/not-blank
+
+If a measure is expected to return 0 but shows BLANK on aggregates:
+- `DIVIDE(x, 0)` returns BLANK by design — this is correct and desired for ratios (BLANK preserves filter context behavior).
+- `COUNTROWS(FILTER(...))` returns BLANK when the filter yields zero rows. To force 0, wrap: `COALESCE(COUNTROWS(FILTER(...)), 0)`.
+- Time-intelligence `TOTALYTD` returns BLANK when no data in the period — see power-bi-modeling "Time-intelligence patterns for synthetic/demo data" for the `DATESBETWEEN + MAX(SalesDate)` anchor pattern.
