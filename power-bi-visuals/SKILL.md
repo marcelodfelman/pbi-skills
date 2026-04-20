@@ -291,6 +291,45 @@ for v in Path('Retail.Report/definition/pages').rglob('visual.json'):
 
 Run it after every batch of `pbi visual bind` calls, before opening the `.pbip` in Desktop. This affects **100% of bound visuals**, not just ones using `--legend`. If Desktop rejects a `.pbip` with the `Commands` schema error, run the one-liner and retry — the fix is idempotent.
 
+### Textbox as KPI title (use this instead of card-with-dummy-measure)
+
+`visualType: "textbox"` IS a valid PBIR 2.7.0 visual type. Earlier guidance in this skill that said otherwise was wrong. For composite KPI tile titles (and any other static-text label inside a tile), prefer textbox over the card-with-invisible-measure hack. Cleaner, no fake measure binding required, fewer lines of JSON.
+
+**Trick — body empty, text in container title.** The textbox `body` (paragraphs/textRuns) stays as `value: ""`. The actual displayed text lives in `visualContainerObjects.title.text`. This way the title styling (font, color, weight) inherits from the report theme without needing per-property overrides.
+
+```json
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.7.0/schema.json",
+  "name": "<your-id>",
+  "position": { "x": ..., "y": ..., "z": ..., "height": ..., "width": ..., "tabOrder": ... },
+  "visual": {
+    "visualType": "textbox",
+    "objects": {
+      "general": [{ "properties": { "paragraphs": [{ "textRuns": [{ "value": "" }] }] }}]
+    },
+    "visualContainerObjects": {
+      "title": [{ "properties": {
+        "show":      { "expr": { "Literal": { "Value": "true" }}},
+        "text":      { "expr": { "Literal": { "Value": "'My Title'" }}},
+        "alignment": { "expr": { "Literal": { "Value": "'right'" }}}
+      }}],
+      "background": [{ "properties": { "show": { "expr": { "Literal": { "Value": "false" }}}}}],
+      "border":     [{ "properties": { "show": { "expr": { "Literal": { "Value": "false" }}}}}],
+      "padding":    [{ "properties": {
+        "left":   { "expr": { "Literal": { "Value": "0D" }}},
+        "bottom": { "expr": { "Literal": { "Value": "0D" }}},
+        "right":  { "expr": { "Literal": { "Value": "0D" }}}
+      }}]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}
+```
+
+**Padding can be partial** — note no `top` key in the padding example above. PBIR accepts subsets of `{top, bottom, left, right}`; defined keys override theme, omitted keys inherit. Don't add keys you don't need.
+
+For RTL pages, use `alignment: 'right'`. For LTR, `'left'` or omit. To override the theme's title font/color/size, add `fontColor`, `fontSize`, `fontFamily`, `bold` siblings under `title.properties` — but only if you need to deviate; theme defaults are fine in most cases.
+
 ### Textbox alignment: set `horizontalTextAlignment` on paragraphs
 
 Textbox visuals default to centered text, which can cause overlap when placed next to slicers. Set alignment explicitly in the paragraph definition:
@@ -527,26 +566,23 @@ Mockup-style KPI cards (title + big value + colored delta pill + last-year value
 
 ### Rectangular variant (for the standard 5-card KPI row, ~220×84)
 
-When upgrading the dense KPI row at the top of analytical pages — typical dimensions 190–240 px wide × 84 px tall — apply a **two-column split** instead of stacking:
+When upgrading the dense KPI row at the top of analytical pages — typical dimensions 190–240 px wide × 84 px tall — **do NOT include a sparkline**. At 84px row height a sparkline renders as a thin colored line that doesn't communicate trend reliably and wastes ~40% of horizontal space the texts need. The trend belongs in a dedicated chart row below the KPI strip, not crammed inside each tile. (If you build a square hero tile ≥200px tall, sparkline becomes legible — see square variant below.)
 
 ```
-┌───────────────────────────────┬──────────────┐
-│ Title (10pt bold, gray-blue)  │              │
-│ $242K (18pt bold, navy)       │   ╱╲    ╱╲   │  ← areaChart
-│ ▲10.9%  LY: $218K             │  ╱  ╲__╱  ╲  │   right column
-└───────────────────────────────┴──────────────┘
-   ~60% w (text stack)             ~38% w (spark)
+┌──────────────────────────────────────────────┐
+│ Title (10pt bold, gray-blue)                 │
+│ $242K (18pt bold, navy)                      │
+│ ▲10.9%  LY: $218K                            │
+└──────────────────────────────────────────────┘
+                full width
 ```
 
-Layout zones for a `(x, y, w, 84)` rectangle:
-- `spark_w = max(60, int(w * 0.30))` — keep sparkline narrow, ~30% of width. Wider eats space the texts need.
-- `text_w = w - spark_w - 14`, gap of 8px
-- Title:     `(x+8, y+6, text_w, 16)` — fontSize 10, bold, left-align
-- Value:     `(x+8, y+22, text_w, 30)` — fontSize 18, bold, displayUnits Auto
-- Pill:      `(x+8, y+h-26, 70, 22)` — fontSize 11, white on green. Make it big enough to read the % comfortably; small pills (e.g. 56×18) clip the value at small widths. **Critical: set `padding: [{...all zero}]` on BOTH `objects.padding` AND `visualContainerObjects.padding`** — the inner card padding clips the % text inside the pill bounds.
-- LY label (separate visual): `(x+8+76, y+h-24, 22, 18)` — card with value invisible, container title shown as `'LY:'` 9pt gray. **Do NOT use the title of the LY value card itself for the "LY:" label** — the title slot occupies the full container width even when the text is short, pushing the value down or clipping it. Render label and value as two separate visuals side-by-side.
-- LY value (separate visual): `(x+8+76+24, y+h-24, text_w-100, 18)` — card with PY measure, no title, fontSize 10 bold dark
-- Sparkline: `(x+w-spark_w-6, y+6, spark_w, h-12)` — fills right column
+Layout zones for a `(x, y, w, 84)` rectangle — text stack uses the full width:
+- title:    `(x+8,  y+6,        w-16,  16)` — **use `visualType: "textbox"`**, NOT a card (see "Textbox as KPI title" below)
+- value:    `(x+8,  y+22,       w-16,  30)` — fontSize 18, bold, displayUnits Auto, precision 1
+- pill:     `(x+8,  y+h-26,     58,    22)` — fontSize 11, white text on green/red. **Critical: set `padding: [{...all zero}]` on BOTH `objects.padding` AND `visualContainerObjects.padding`** — the inner card padding clips the % text inside the pill bounds.
+- ly_label (separate visual): `(x+72, y+h-24, 22, 18)` — card with value invisible, container title shown as `'LY:'` 9pt gray. **Do NOT use the title of the LY value card itself for the "LY:" label** — the title slot occupies the full container width even when the text is short, pushing the value down or clipping it. Render label and value as two separate visuals side-by-side.
+- ly_value (separate visual): `(x+96, y+h-24, w-104, 18)` — card with PY measure, no title, fontSize 9 bold dark
 
 **Tier classification — not every measure makes sense for pill+LY+sparkline:**
 - **Lite** (frame+title+value only): measures that are point-in-time states with no FactDate relationship (`DimX[IsActive]=TRUE` style — same value in CY and PY → meaningless YoY, flat sparkline). Examples: Active Certifications, Expiring Soon, Audit Readiness Score.
