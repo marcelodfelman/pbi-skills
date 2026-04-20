@@ -476,6 +476,232 @@ Symptom: a `by Year` line chart on 2 years of data shows a single diagonal strai
 
 **Fix:** add `DimDate[MonthName]` as a second level in the Categories projections, with BOTH levels `active: true` so the chart renders monthly points that aggregate into the Year header. (Setting MonthName `active: false` means drill-down-available-but-not-expanded — which leaves the chart at the Year level, i.e. still two points.)
 
+## Composite "hero" KPI tile (mockup-style card)
+
+Mockup-style KPI cards (title + big value + colored delta pill + last-year value + sparkline, all in one rounded tile) cannot be built with a single Power BI visual. The classic `card` shows one number; `cardVisual` / `cardNew` are closer but still constrained. The reliable way is to **overlay 5–6 visuals inside one square frame**.
+
+**Rules learned from production refactor — apply by default, do not deviate:**
+
+1. **Square aspect ratio.** Frame is **230×230 px** (not 240×340 or other tall rectangles). Tall composites look unbalanced; the square reads as a "dashboard tile" in modern SaaS style. Place at any `(x, y)` you want, but keep `width == height == 230`.
+
+2. **Frame = invisible card.** The bottom layer (`z=0`) is a `card` visual with a real measure projection (any measure works) but rendered invisibly:
+   ```json
+   "objects": {
+     "labels":         [{"properties": {"color": "#FFFFFF", "fontSize": 8D}}],
+     "categoryLabels": [{"properties": {"show": false}}]
+   }
+   ```
+   Its only role is to render the white background + rounded border (`radius: 16D`). Everything else stacks above with higher `z`.
+
+3. **Sparkline = `areaChart`, never `lineChart`.** The filled area reads better at small sizes (~80px tall) — a stroke-only line is too thin to convey trend at thumbnail scale. Always include an explicit `query.sortDefinition` sorting `DimDate[Year]` then `DimDate[MonthName]` ascending. Without it, points may render in alphabetical month order ("April, August, December…") and the line zigzags.
+
+4. **Strip card padding for micro-elements.** Pills, last-year values, and any card embedded inside a parent tile need `padding` set to zero on all four sides:
+   ```json
+   "objects": {
+     "padding": [{"properties": {
+       "top":    {"expr": {"Literal": {"Value": "0D"}}},
+       "bottom": {"expr": {"Literal": {"Value": "0D"}}},
+       "left":   {"expr": {"Literal": {"Value": "0D"}}},
+       "right":  {"expr": {"Literal": {"Value": "0D"}}}
+     }}]
+   }
+   ```
+   Default card padding wastes ~10 px on each side — half the height of a 28 px pill. Without `padding=0` the value gets clipped or appears in tiny font.
+
+5. **Hide `categoryLabels` on every overlaid card.** The measure name is redundant inside a composite tile — context (title, position, color) tells the user what the number means. `categoryLabels.show = false` on all child cards.
+
+6. **No backgrounds, no borders on overlays.** Every overlaid card/lineChart/areaChart needs `visualContainerObjects.background.show=false` and `border.show=false`. Only the frame (z=0) draws the visible tile boundary.
+
+**Reference layout zones inside the 230×230 frame at `(520, 180)`:**
+
+| Element       | x      | y      | w   | h    | z | Notes |
+|---------------|--------|--------|-----|------|---|-------|
+| Frame (bg)    | 520    | 180    | 230 | 230  | 0 | invisible card |
+| Title         | 540    | 190.83 | 200 | 31.7 | 1 | container `title.show=true`, value invisible |
+| Value         | 540    | 216.67 | 200 | 50   | 2 | fontSize 24, displayUnits Auto or 1M, precision 1 |
+| Delta pill    | 592.5  | 266.67 | 95  | 30.8 | 3 | bg `#2D7D6E` (green) or `#B33A3A` (red), radius 14D, fontSize 13 white bold |
+| Last Year     | 627.5  | 315    | 132.5 | 27.5 | 4 | small, no categoryLabel |
+| Sparkline     | 540    | 326.78 | 199 | 80   | 5 | `areaChart` with sortDefinition |
+
+**When to use this pattern:** "hero" KPIs — one large decorative tile per page, intended as the main visual element.
+
+### Rectangular variant (for the standard 5-card KPI row, ~220×84)
+
+When upgrading the dense KPI row at the top of analytical pages — typical dimensions 190–240 px wide × 84 px tall — apply a **two-column split** instead of stacking:
+
+```
+┌───────────────────────────────┬──────────────┐
+│ Title (10pt bold, gray-blue)  │              │
+│ $242K (18pt bold, navy)       │   ╱╲    ╱╲   │  ← areaChart
+│ ▲10.9%  LY: $218K             │  ╱  ╲__╱  ╲  │   right column
+└───────────────────────────────┴──────────────┘
+   ~60% w (text stack)             ~38% w (spark)
+```
+
+Layout zones for a `(x, y, w, 84)` rectangle:
+- `spark_w = max(60, int(w * 0.30))` — keep sparkline narrow, ~30% of width. Wider eats space the texts need.
+- `text_w = w - spark_w - 14`, gap of 8px
+- Title:     `(x+8, y+6, text_w, 16)` — fontSize 10, bold, left-align
+- Value:     `(x+8, y+22, text_w, 30)` — fontSize 18, bold, displayUnits Auto
+- Pill:      `(x+8, y+h-26, 70, 22)` — fontSize 11, white on green. Make it big enough to read the % comfortably; small pills (e.g. 56×18) clip the value at small widths. **Critical: set `padding: [{...all zero}]` on BOTH `objects.padding` AND `visualContainerObjects.padding`** — the inner card padding clips the % text inside the pill bounds.
+- LY label (separate visual): `(x+8+76, y+h-24, 22, 18)` — card with value invisible, container title shown as `'LY:'` 9pt gray. **Do NOT use the title of the LY value card itself for the "LY:" label** — the title slot occupies the full container width even when the text is short, pushing the value down or clipping it. Render label and value as two separate visuals side-by-side.
+- LY value (separate visual): `(x+8+76+24, y+h-24, text_w-100, 18)` — card with PY measure, no title, fontSize 10 bold dark
+- Sparkline: `(x+w-spark_w-6, y+6, spark_w, h-12)` — fills right column
+
+**Tier classification — not every measure makes sense for pill+LY+sparkline:**
+- **Lite** (frame+title+value only): measures that are point-in-time states with no FactDate relationship (`DimX[IsActive]=TRUE` style — same value in CY and PY → meaningless YoY, flat sparkline). Examples: Active Certifications, Expiring Soon, Audit Readiness Score.
+- **No-pill** (frame+title+value+sparkline): measures that vary over time but where YoY is meta or already-a-comparison. Examples: `Net Sales YoY %` (YoY of YoY), `Net Sales vs Budget %` (already a variance), `Headcount Variance` (already a variance — YoY of variance is volatile noise).
+- **Full** (frame+title+value+pill+LY+sparkline): everything else — requires the model to have `<Measure> PY` and `<Measure> YoY %` companion measures.
+
+**Generating PY+YoY% companion measures in bulk:** when the model has dozens of measures without time-intelligence companions, generate them following the project's MaxDate pattern (NEVER use `SAMEPERIODLASTYEAR` or `DATEADD` directly — they return BLANK when filter context is empty, which breaks the card display). Pattern, parameterized by fact-table date column:
+
+```dax
+<Measure> PY =
+    VAR MaxDate = CALCULATE(MAX(<Fact>[<DateCol>]), ALL())
+    RETURN
+        CALCULATE([<Measure>], YEAR(DimDate[Date]) = YEAR(MaxDate) - 1)
+
+<Measure> YoY % =
+    VAR MaxDate = CALCULATE(MAX(<Fact>[<DateCol>]), ALL())
+    VAR CY = CALCULATE([<Measure>], YEAR(DimDate[Date]) = YEAR(MaxDate))
+    VAR PY = CALCULATE([<Measure>], YEAR(DimDate[Date]) = YEAR(MaxDate) - 1)
+    RETURN IF(ISBLANK(PY), BLANK(), DIVIDE(CY - PY, PY))
+```
+
+The `IF(ISBLANK(PY), BLANK(), ...)` guard hides the pill/LY for the earliest year where there is no comparable (data start year). Without it the pill shows `-100%` falsely.
+
+Inherit the base measure's `formatString` and `displayFolder` for the PY measure so it sorts next to its base; use `0.0%` format for the YoY % measure.
+
+### Pill conditional formatting — green/red by business polarity
+
+A pill that is **always green** is misleading. Half the measures in a typical FMCG / retail / supply-chain model are **lower-is-better** (DSO, DIO, AR, defect rate, downtime, scrap, complaints, freight cost) — for those, a +5% YoY is BAD and must render red.
+
+**Pattern: one `<Measure> YoY Color` companion per base measure.** Returns a hex string the pill background+border bind to via field-value conditional formatting.
+
+```dax
+<Measure> YoY Color =
+    VAR V = [<Measure> YoY %]
+    RETURN
+        IF(
+            ISBLANK(V),
+            "#9E9E9E",   -- gray for first-year edge case (no comparable)
+            IF(<cond>, "#2D7D6E", "#B33A3A")
+        )
+```
+
+Where `<cond>` flips by polarity:
+- **Higher-is-better** (default — sales, margin, OTIF, market share, ROI, throughput, OEE, headcount, training completion, MTBF): `V >= 0`
+- **Lower-is-better** (costs, balances, failures): `V <= 0`
+
+Mark the color measure `isHidden` and place in a `99 Conditional Formatting` displayFolder so it doesn't pollute the field list.
+
+**Lower-is-better classification cheat sheet** (memorize the categories, not the individual measures — apply judgment to new ones):
+- **Working capital balances**: DSO, DIO, AR Outstanding/Disputed/Past Due/High Risk, Cash Conversion Cycle, Inventory Value, % Aged, Slow-Moving SKUs, Stockout Rate
+- **Costs**: Freight Cost (any variant), Total Spend, Avg Price (raw materials), Campaign Spend, Trade Spend, Lead Time
+- **Quality / safety failures**: Complaint Rate, NCR Count, Critical/Hold Events, Open/Overdue CAPAs, LTI, LTIFR, Days Lost, Near-Miss
+- **Operations waste**: Downtime (events/duration), MTTR, Scrap %, Unplanned Downtime %, Energy/Water Intensity
+- **HR attrition / strain**: Turnover %, Absenteeism %, Overtime %
+- **Supplier risk**: Defect Rate (ppm), HHI (concentration), PPV (variance vs std)
+- **Competitor share**: Competitor Value (we want competitor's share to drop)
+
+**PBIR binding** — the pill's `visualContainerObjects.background.color` and `border.color` both point to the color measure as field value:
+
+```json
+"color": {
+  "solid": {
+    "color": {
+      "expr": {
+        "Measure": {
+          "Expression": {"SourceRef": {"Entity": "<Fact>"}},
+          "Property": "<Measure> YoY Color"
+        }
+      }
+    }
+  }
+}
+```
+
+This is "field value" conditional formatting — Desktop reads the measure result (a hex string) and uses it directly as the color. No `FillRule` / `linearGradient` envelope needed for this pattern.
+
+**Why the gray BLANK branch matters:** without it, the pill renders as the chart palette default (often white/transparent) when YoY is BLANK, making the pill disappear into the card. Gray `#9E9E9E` keeps the pill visible while signaling "no comparable" honestly.
+
+**Title text via container header:** since cards can't show static text, the "Sales" title is rendered as the visual container's title:
+```json
+"visualContainerObjects": {
+  "title": [{
+    "properties": {
+      "show":      {"expr": {"Literal": {"Value": "true"}}},
+      "text":      {"expr": {"Literal": {"Value": "'Sales'"}}},
+      "fontSize":  {"expr": {"Literal": {"Value": "'18'"}}},
+      "bold":      {"expr": {"Literal": {"Value": "true"}}},
+      "alignment": {"expr": {"Literal": {"Value": "'left'"}}}
+    }
+  }]
+}
+```
+
+## Bilingual / RTL pages — what works in PBIR 2.7.0 and what doesn't
+
+**Don't try to build an in-page language toggle from scratch.** PBIR 2.7.0 supports `actionButton` visuals + bookmark JSON at `Retail.Report/definition/bookmarks/<id>.bookmark.json`, but the schemas for `actionButton.objects.{shape,fill,outline,text}` properties and for `visualContainerObjects.visualLink` are sparsely documented. `pbi report validate` accepts hand-written guesses; Desktop rejects them. Concrete failures observed:
+- `visualContainerObjects.general[0].properties.show = false` → `"Property 'show' has not been defined and the schema does not allow additional properties"` from Desktop. There is no per-visual visibility property in PBIR 2.7.0 visual.json.
+- `visualContainerObjects.visualLink[0].properties.{type,bookmark}` → unverified; Desktop may reject.
+- Bookmark JSON `explorationState.sections.<page>.visualContainers.<vis>.singleVisual.display.mode = "hidden"` → unverified format.
+
+**Robust path: two pages instead of one toggle.** Copy the source page, mirror coords for RTL (`x' = 1280 - x - width` applied to every visual's `position.x`), translate titles in-place via `visualContainerObjects.title.text` Literals, and rebind columns to language-specific companions. The page navigator becomes the switch. To add a real button toggle later, generate bookmarks + buttons via Desktop UI (Insert → Buttons → Blank, Action → Bookmark) — Desktop emits valid PBIR JSON that you can then version-control.
+
+### Mirror-for-RTL coordinate flip
+
+```python
+new_x = canvas_width - old_x - width
+```
+
+Apply to `position.x` of every visual (including slicers and logo) on the mirrored page. Don't touch `y`, `width`, `height`, or `tabOrder`. Also align titles to the right: `visualContainerObjects.title[0].properties.alignment = "'right'"` so multi-word titles read as RTL.
+
+### HE companion columns for translated axes/categories/slicer values
+
+Hebrew (or any non-EN) text in chart axes, slicer dropdowns, or categorical bars requires a sibling column with pre-translated data. The column display name doesn't help — that only renames the field's heading, not the row values. Add to the dim's M partition:
+
+```m
+HebMonths = {"ינואר","פברואר","מרץ","אפריל","מאי","יוני","יולי","אוגוסט","ספטמבר","אוקטובר","נובמבר","דצמבר"},
+WithMoH   = Table.AddColumn(WithMoN, "MonthNameHE", each HebMonths{Date.Month([Date]) - 1}, type text),
+```
+
+Plus a column block in the table TMDL with the same `sortByColumn` as the EN sibling:
+
+```tmdl
+column MonthNameHE
+    dataType: string
+    lineageTag: <new-uuid>
+    sourceColumn: MonthNameHE
+    sortByColumn: MonthNum
+```
+
+Then rebind in the HE visuals: `Property: "MonthName"` → `"MonthNameHE"`, plus update `queryRef` and `nativeQueryRef` accordingly. Same pattern works for ProductNameHE, ChannelHE, BrandHE, etc. Build only the columns needed for the visuals on the bilingual page — don't blanket-create HE for every dim.
+
+### Slicer "field label" override (Hebrew or any custom text)
+
+A slicer's default header renders the bound column's name ("Year", "Channel"). To show a custom label without changing the column's model-wide display name:
+
+```json
+"objects": {
+  "header": [{"properties": {"show": {"expr": {"Literal": {"Value": "false"}}}}}]
+},
+"visualContainerObjects": {
+  "title": [{
+    "properties": {
+      "show": {"expr": {"Literal": {"Value": "true"}}},
+      "text": {"expr": {"Literal": {"Value": "'שנה'"}}},
+      "alignment": {"expr": {"Literal": {"Value": "'right'"}}},
+      "fontSize": {"expr": {"Literal": {"Value": "'11'"}}},
+      "bold": {"expr": {"Literal": {"Value": "true"}}},
+      "fontFamily": {"expr": {"Literal": {"Value": "'Segoe UI'"}}}
+    }
+  }]
+}
+```
+
+The container title sits above the slicer where the auto-header used to be. Use `alignment: 'right'` for RTL languages.
+
 ## Unicode escape literal in visual.json binding strings
 
 If a measure name contains `³`, `°`, `₪`, `µ` (Water Intensity `(m³/T)`, Temperature `(°C)`, etc.) and the `visual.json` binding was copy-pasted from a terminal that escaped the character, you'll see the literal 6-character sequence `\u00b3` in `Property`, `queryRef`, and `nativeQueryRef`. The measure lookup fails and Desktop renders the KPI card as a visual-level error ("See details" with X icon).

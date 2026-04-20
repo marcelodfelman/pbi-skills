@@ -345,3 +345,20 @@ If a measure is expected to return 0 but shows BLANK on aggregates:
 - `DIVIDE(x, 0)` returns BLANK by design — this is correct and desired for ratios (BLANK preserves filter context behavior).
 - `COUNTROWS(FILTER(...))` returns BLANK when the filter yields zero rows. To force 0, wrap: `COALESCE(COUNTROWS(FILTER(...)), 0)`.
 - Time-intelligence `TOTALYTD` returns BLANK when no data in the period — see power-bi-modeling "Time-intelligence patterns for synthetic/demo data" for the `DATESBETWEEN + MAX(SalesDate)` anchor pattern.
+
+## "Missing_References" error at report load
+
+**Symptom:** Desktop or the Power BI Service throws `Underlying Error: Missing_References` when opening/loading the report, with a page-level error preventing render.
+
+**Root cause:** A `visual.json` binding references a measure or column with a wrong entity. The JSON says `FactHREvent.Absenteeism %` but the measure actually lives on `FactHeadcount`. The engine can't resolve the reference and errors out.
+
+**Common when:** enriching tables with measures inferred from the page topic ("HR page → all measures on FactHREvent"), without verifying each measure's actual home table. Measures often live on the fact table whose columns they SUM — `Overtime %` and `Absenteeism %` sum hours from `FactHeadcount`, not events from `FactHREvent`, even though they're conceptually "HR measures."
+
+**Diagnosis:** grep the TMDL for each measure name bound in the visual, check which table file contains it:
+```
+grep -l "measure 'Absenteeism %'" Retail.SemanticModel/definition/tables/*.tmdl
+```
+
+**Fix:** update the `visual.query.queryState.Values.projections[].field.Measure.Expression.SourceRef.Entity` and `queryRef` to point to the correct table. Also verify `nativeQueryRef` matches the measure name exactly.
+
+**Prevention:** before adding any measure binding to a visual, call `measure_operations.Get` (or grep the TMDL) with the exact name to confirm which `Entity` owns it. Never assume "HR measures live in FactHREvent" — check.
