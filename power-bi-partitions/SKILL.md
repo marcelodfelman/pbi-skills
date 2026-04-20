@@ -311,3 +311,29 @@ ExpandedRows = List.Combine(List.Transform(WeekCats, (wc) =>
 Two rules:
 1. **Keep nested lambdas shallow.** At most one inner closure that references variables from one outer closure. Anything deeper — flatten the iteration domain first.
 2. **Use records, not positional lists, for lookup data.** `[key=0, code="OWN", base=0.22]` with `comp[base]` is immune to position shifts and reads more clearly than `{0, "OWN", 0.22}` with `c{2}`.
+
+## Bilingual companion columns (HE / any non-EN)
+
+For dim columns whose VALUES (not the column name) need to be displayed in another language — e.g., DimDate has `MonthName = "January"` but a HE page needs the X-axis to read "ינואר" — add a sibling column to the M partition with pre-translated text. Renaming the field's display name does NOT translate the row values; you need a second column.
+
+**M pattern (DimDate adding `MonthNameHE`):**
+
+```m
+WithMoN   = Table.AddColumn(WithMo,  "MonthName",   each Date.MonthName([Date], "en-US"), type text),
+HebMonths = {"ינואר","פברואר","מרץ","אפריל","מאי","יוני","יולי","אוגוסט","ספטמבר","אוקטובר","נובמבר","דצמבר"},
+WithMoH   = Table.AddColumn(WithMoN, "MonthNameHE", each HebMonths{Date.Month([Date]) - 1}, type text),
+```
+
+**Matching TMDL column block** — must copy the EN sibling's `sortByColumn` so chronological ordering still works:
+
+```tmdl
+column MonthNameHE
+    dataType: string
+    lineageTag: <new-uuid>
+    sourceColumn: MonthNameHE
+    sortByColumn: MonthNum
+```
+
+**Visual rebind** in the HE page's `visual.json`: change `Property: "MonthName"` → `"MonthNameHE"` and update both `queryRef` and `nativeQueryRef` to match. Don't touch the EN page's bindings — keep the two-page approach so each language uses its own column.
+
+Same recipe applies to ProductNameHE (already exists in `DimProduct`), and would extend to ChannelHE, BrandHE, CustomerHE, etc. Build only the columns the bilingual page actually uses — the model doesn't need HE for every dim.
